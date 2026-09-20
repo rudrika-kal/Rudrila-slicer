@@ -1,0 +1,118 @@
+name: Rudrila Slicer Step 1 - Slice Engine V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-step1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate source and Step 1 patch
+        run: |
+          set -euo pipefail
+          test -f RudrilaSlicer-alpha07-source.zip
+          test -f Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
+          unzip -t RudrilaSlicer-alpha07-source.zip
+          unzip -t Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
+          sha256sum RudrilaSlicer-alpha07-source.zip Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
+
+      - name: Extract current Alpha07 source
+        run: |
+          set -euo pipefail
+          rm -rf RudrilaSlicer-alpha07-work _step1_patch
+          unzip -q RudrilaSlicer-alpha07-source.zip
+          test -f RudrilaSlicer-alpha07-work/settings.gradle.kts
+          test -f RudrilaSlicer-alpha07-work/app/build.gradle.kts
+
+      - name: Merge Slice Engine V2 Step 1 overlay
+        run: |
+          set -euo pipefail
+          mkdir -p _step1_patch
+          unzip -q Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip -d _step1_patch
+          PATCH_ROOT="$(find _step1_patch -type d -name overlay -print -quit)"
+          test -n "$PATCH_ROOT"
+          test -d "$PATCH_ROOT/app"
+          cp -a "$PATCH_ROOT/app/." RudrilaSlicer-alpha07-work/app/
+          if [ -d "$PATCH_ROOT/tests" ]; then
+            mkdir -p RudrilaSlicer-alpha07-work/tests
+            cp -a "$PATCH_ROOT/tests/." RudrilaSlicer-alpha07-work/tests/
+          fi
+          grep -q "exportBlockerSummary" RudrilaSlicer-alpha07-work/app/src/main/java/com/rudrila/slicer/model/ContourSlicer.kt
+          grep -q "canExport" RudrilaSlicer-alpha07-work/app/src/main/java/com/rudrila/slicer/model/ToolpathEngine.kt
+          grep -q "toolpaths.canExport" RudrilaSlicer-alpha07-work/app/src/main/java/com/rudrila/slicer/model/GCodeExporter.kt
+          echo "Slice Engine V2 overlay merged successfully"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK 36
+        env:
+          ANDROID_HOME: /usr/local/lib/android/sdk
+          ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Setup Gradle 9.6
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.0"
+
+      - name: Build Step 1 APK - Pass 1
+        working-directory: RudrilaSlicer-alpha07-work
+        run: |
+          set -euo pipefail
+          gradle --version
+          gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK - Pass 1
+        run: |
+          set -euo pipefail
+          APK="RudrilaSlicer-alpha07-work/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          unzip -t "$APK"
+          ls -lh "$APK"
+
+      - name: Clean before second build
+        working-directory: RudrilaSlicer-alpha07-work
+        run: gradle clean
+
+      - name: Build Step 1 APK - Pass 2
+        working-directory: RudrilaSlicer-alpha07-work
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify and package Step 1 APK
+        run: |
+          set -euo pipefail
+          APK="RudrilaSlicer-alpha07-work/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          unzip -t "$APK"
+          sha256sum "$APK"
+          cp "$APK" Rudrila-Slicer-Step1-SliceEngineV2.apk
+          sha256sum Rudrila-Slicer-Step1-SliceEngineV2.apk > Rudrila-Slicer-Step1-SliceEngineV2.apk.sha256
+
+      - name: Upload Step 1 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rudrila-Slicer-Step1-SliceEngineV2-APK
+          path: |
+            Rudrila-Slicer-Step1-SliceEngineV2.apk
+            Rudrila-Slicer-Step1-SliceEngineV2.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
