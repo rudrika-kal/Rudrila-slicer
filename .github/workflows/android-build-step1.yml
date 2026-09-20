@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f RudrilaSlicer-alpha07-source.zip
-          test -f Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
+          test -f Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip
           unzip -t RudrilaSlicer-alpha07-source.zip
           unzip -t Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
           sha256sum RudrilaSlicer-alpha07-source.zip Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
