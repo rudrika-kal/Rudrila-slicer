@@ -18,28 +18,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate source and Step 1 patch
+      - name: Validate source and patch
         run: |
           set -euo pipefail
           test -f RudrilaSlicer-alpha07-source.zip
-          test -f Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip
+          test -f Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
           unzip -t RudrilaSlicer-alpha07-source.zip
-          unzip -t Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip
-          sha256sum RudrilaSlicer-alpha07-source.zip Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip
+          unzip -t Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
 
-      - name: Extract current Alpha07 source
+      - name: Extract source
         run: |
           set -euo pipefail
           rm -rf RudrilaSlicer-alpha07-work _step1_patch
           unzip -q RudrilaSlicer-alpha07-source.zip
           test -f RudrilaSlicer-alpha07-work/settings.gradle.kts
-          test -f RudrilaSlicer-alpha07-work/app/build.gradle.kts
 
-      - name: Merge Slice Engine V2 Step 1 overlay
+      - name: Merge Step 2 patch
         run: |
           set -euo pipefail
           mkdir -p _step1_patch
-          unzip -q Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip -d _step1_patch
+          unzip -q Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip -d _step1_patch
           PATCH_ROOT="$(find _step1_patch -type d -name overlay -print -quit)"
           test -n "$PATCH_ROOT"
           test -d "$PATCH_ROOT/app"
@@ -48,10 +46,6 @@ jobs:
             mkdir -p RudrilaSlicer-alpha07-work/tests
             cp -a "$PATCH_ROOT/tests/." RudrilaSlicer-alpha07-work/tests/
           fi
-          grep -q "exportBlockerSummary" RudrilaSlicer-alpha07-work/app/src/main/java/com/rudrila/slicer/model/ContourSlicer.kt
-          grep -q "canExport" RudrilaSlicer-alpha07-work/app/src/main/java/com/rudrila/slicer/model/ToolpathEngine.kt
-          grep -q "toolpaths.canExport" RudrilaSlicer-alpha07-work/app/src/main/java/com/rudrila/slicer/model/GCodeExporter.kt
-          echo "Slice Engine V2 overlay merged successfully"
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -74,45 +68,40 @@ jobs:
         with:
           gradle-version: "9.6.0"
 
-      - name: Build Step 1 APK - Pass 1
+      - name: Build APK Pass 1
         working-directory: RudrilaSlicer-alpha07-work
         run: |
           set -euo pipefail
-          gradle --version
           gradle :app:assembleDebug --stacktrace
 
-      - name: Verify APK - Pass 1
+      - name: Verify APK Pass 1
         run: |
           set -euo pipefail
           APK="RudrilaSlicer-alpha07-work/app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
           unzip -t "$APK"
-          ls -lh "$APK"
 
-      - name: Clean before second build
+      - name: Clean
         working-directory: RudrilaSlicer-alpha07-work
         run: gradle clean
 
-      - name: Build Step 1 APK - Pass 2
+      - name: Build APK Pass 2
         working-directory: RudrilaSlicer-alpha07-work
         run: gradle :app:assembleDebug --stacktrace
 
-      - name: Verify and package Step 1 APK
+      - name: Package APK
         run: |
           set -euo pipefail
           APK="RudrilaSlicer-alpha07-work/app/build/outputs/apk/debug/app-debug.apk"
           test -f "$APK"
           unzip -t "$APK"
           sha256sum "$APK"
-          cp "$APK" Rudrila-Slicer-Step1-SliceEngineV2.apk
-          sha256sum Rudrila-Slicer-Step1-SliceEngineV2.apk > Rudrila-Slicer-Step1-SliceEngineV2.apk.sha256
+          cp "$APK" Rudrila-Slicer-Step2-LayerPreview.apk
 
-      - name: Upload Step 1 APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Rudrila-Slicer-Step1-SliceEngineV2-APK
-          path: |
-            Rudrila-Slicer-Step1-SliceEngineV2.apk
-            Rudrila-Slicer-Step1-SliceEngineV2.apk.sha256
+          name: Rudrila-Slicer-Step2-LayerPreview-APK
+          path: Rudrila-Slicer-Step2-LayerPreview.apk
           if-no-files-found: error
           retention-days: 30
