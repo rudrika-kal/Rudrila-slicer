@@ -24,8 +24,8 @@ jobs:
           test -f RudrilaSlicer-alpha07-source.zip
           test -f Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip
           unzip -t RudrilaSlicer-alpha07-source.zip
-          unzip -t Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
-          sha256sum RudrilaSlicer-alpha07-source.zip Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
+          unzip -t Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip
+          sha256sum RudrilaSlicer-alpha07-source.zip Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip
 
       - name: Extract current Alpha07 source
         run: |
@@ -39,7 +39,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _step1_patch
-          unzip -q Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip -d _step1_patch
+          unzip -q Rudrila-Slicer-Step2-LayerPreview-Patch(1).zip -d _step1_patch
           PATCH_ROOT="$(find _step1_patch -type d -name overlay -print -quit)"
           test -n "$PATCH_ROOT"
           test -d "$PATCH_ROOT/app"
