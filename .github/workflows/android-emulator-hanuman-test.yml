@@ -66,11 +66,29 @@ jobs:
           unzip -t "$APK" >/dev/null
           sha256sum "$APK"
 
-      - name: Download exact Hanuman regression STL from latest GitHub Release
+      - name: Download exact Hanuman regression STL from pinned GitHub Release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          URL="https://github.com/rudrika-kal/Rudrila-slicer/releases/download/hanuman-test-assets-v1/obj_1_Object_1.stl"
-          curl -L --fail --retry 4 --retry-delay 3 "$URL" -o /tmp/obj_1_Object_1.stl
+          API_URL="https://api.github.com/repos/rudrika-kal/Rudrila-slicer/releases/assets/578774030"
+          PUBLIC_URL="https://github.com/rudrika-kal/Rudrila-slicer/releases/download/hanuman-test-assets-v1/obj_1_Object_1.stl"
+          rm -f /tmp/obj_1_Object_1.stl
+
+          # Prefer the authenticated asset API. It avoids transient public release-redirect 504s
+          # seen on the 153 MB regression model. Fall back to the public URL if GitHub's asset API
+          # is temporarily unavailable. Both paths are pinned by exact size + SHA-256 below.
+          if ! curl -L --fail --retry 8 --retry-delay 4 --retry-all-errors \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$API_URL" -o /tmp/obj_1_Object_1.stl; then
+            echo "Authenticated asset API failed; using public release fallback"
+            rm -f /tmp/obj_1_Object_1.stl
+            curl -L --fail --retry 12 --retry-delay 5 --retry-all-errors \
+              "$PUBLIC_URL" -o /tmp/obj_1_Object_1.stl
+          fi
+
           test "$(stat -c%s /tmp/obj_1_Object_1.stl)" = "153340484"
           echo "110968b1ae1610b136f664e3d2ebc1ff6106e7cd891e8f500baaa752cbfa437e  /tmp/obj_1_Object_1.stl" | sha256sum -c -
           ls -lh /tmp/obj_1_Object_1.stl
@@ -143,6 +161,39 @@ jobs:
             return 1
           }
 
+          focus_and_activate() {
+            local needle="$1"
+            local i
+            for i in $(seq 1 24); do
+              adb shell input keyevent 61 >/dev/null 2>&1 || true
+              sleep 0.25
+              ui_dump
+              if python3 - "$OUT/window.xml" "$needle" <<'PY'
+          import sys,xml.etree.ElementTree as ET
+          root=ET.parse(sys.argv[1]).getroot(); needle=sys.argv[2]
+          ok=any((n.attrib.get('text') or '')==needle and n.attrib.get('focused')=='true' for n in root.iter('node'))
+          raise SystemExit(0 if ok else 1)
+          PY
+              then
+                adb shell input keyevent 66 >/dev/null 2>&1 || true
+                return 0
+              fi
+            done
+            return 1
+          }
+
+          wait_slice_started() {
+            local end=$((SECONDS+${1:-12}))
+            while (( SECONDS < end )); do
+              ui_dump
+              if grep -Fqi "Slicing" "$OUT/window.xml" 2>/dev/null || grep -Fqi "Slice complete" "$OUT/window.xml" 2>/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
+
           echo "== Install/launch =="
           adb install -r "$APK"
           adb shell am force-stop "$PKG" || true
@@ -192,39 +243,40 @@ jobs:
           screenshot 02b-profile-saved
 
           echo "== Slice exact Hanuman =="
-          # The old automation could tap SLICE while the profile dialog/IME was still dismissing.
-          # Do not start the long timer until the app itself confirms that slicing actually began.
+          # Give the GL view/profile dialog time to fully settle. Touch injection can be flaky on
+          # headless emulators, so use touch first and keyboard-focus activation as fallback.
+          sleep 8
+          screenshot 03-before-slice
           STARTED=0
-          for ATTEMPT in 1 2 3; do
-            echo "SLICE tap attempt $ATTEMPT"
-            tap_text "SLICE" || true
-            sleep 2
-            ui_dump
-            if grep -Fqi "Slicing" "$OUT/window.xml" 2>/dev/null || grep -Fqi "Slice complete" "$OUT/window.xml" 2>/dev/null; then
+          for ATTEMPT in 1 2 3 4; do
+            echo "SLICE activation attempt $ATTEMPT"
+            if [ "$ATTEMPT" -eq 1 ] || [ "$ATTEMPT" -eq 3 ]; then
+              tap_text "SLICE" || true
+            else
+              focus_and_activate "SLICE" || true
+            fi
+            if wait_slice_started 12; then
               STARTED=1
               break
             fi
-            # Hide any lingering IME/overlay without navigating away from the activity.
-            adb shell input keyevent 111 || true
-            sleep 1
           done
           if [ "$STARTED" != "1" ]; then
             screenshot 03-slice-not-started
             adb logcat -d > "$OUT/logcat-slice-not-started.txt" || true
+            ui_dump
+            cp "$OUT/window.xml" "$OUT/slice-not-started-window.xml" || true
             echo "ERROR: SLICE action never started; refusing to mislabel this as an engine timeout" >&2
             exit 30
           fi
-          screenshot 03-slicing-started
+          screenshot 04-slicing-started
 
-          # Only now measure engine completion. Exact Hanuman gets a generous ceiling; progress is
-          # sampled so a real engine timeout is distinguishable from UI automation failure.
           END=$((SECONDS+900))
           COMPLETE=0
           while (( SECONDS < END )); do
             ui_dump
             if grep -Fqi "Slice complete" "$OUT/window.xml" 2>/dev/null; then COMPLETE=1; break; fi
             if grep -Fqi "Slice failed" "$OUT/window.xml" 2>/dev/null; then
-              screenshot 04-slice-failed
+              screenshot 05-slice-failed
               adb logcat -d > "$OUT/logcat-slice-failed.txt" || true
               echo "ERROR: app reported Slice failed" >&2
               exit 34
@@ -232,7 +284,7 @@ jobs:
             sleep 3
           done
           if [ "$COMPLETE" != "1" ]; then
-            screenshot 04-engine-timeout
+            screenshot 05-engine-timeout
             adb logcat -d > "$OUT/logcat-engine-timeout.txt" || true
             ui_dump
             cp "$OUT/window.xml" "$OUT/engine-timeout-window.xml" || true
@@ -240,40 +292,53 @@ jobs:
             exit 35
           fi
           ui_dump
-          cp "$OUT/window.xml" "$OUT/03-slice-dialog.xml"
-          grep -Fq "Geometry gate: PASS" "$OUT/03-slice-dialog.xml"
-          if grep -Fq "Supports V2: OFF" "$OUT/03-slice-dialog.xml"; then
+          cp "$OUT/window.xml" "$OUT/06-slice-dialog.xml"
+          grep -Fq "Geometry gate: PASS" "$OUT/06-slice-dialog.xml"
+          if grep -Fq "Supports V2: OFF" "$OUT/06-slice-dialog.xml"; then
             echo "ERROR: supports are still OFF" >&2
             exit 31
           fi
-          screenshot 05-slice-complete
+          grep -Fq "Supports V2: Tree / Organic" "$OUT/06-slice-dialog.xml"
+          screenshot 06-slice-complete
 
-          echo "== Export G-code =="
-          tap_text "EXPORT G-CODE"
-          sleep 3
-          # ACTION_CREATE_DOCUMENT should prefill rudrila_print.gcode.
-          tap_text "SAVE" || tap_text "Save" || true
-          sleep 5
-          wait_text "G-code exported" 120
-          screenshot 06-gcode-exported
-
-          echo "== Preview runtime =="
-          tap_text "PREVIEW"
+          echo "== Preview runtime and support-path verification =="
+          tap_text "PREVIEW" || focus_and_activate "PREVIEW" || true
           wait_text "Toolpath Preview" 60
           screenshot 07-preview
 
-          echo "== Search multiple preview heights for actual Support/Interface paths =="
-          # Right slider is close to the right side of the preview dialog.
-          SIZE="$(adb shell wm size | tr -d '\r')"
-          W="$(echo "$SIZE" | sed -n 's/.*Physical size: \([0-9]*\)x\([0-9]*\).*/\1/p')"
-          H="$(echo "$SIZE" | sed -n 's/.*Physical size: \([0-9]*\)x\([0-9]*\).*/\2/p')"
-          [ -n "$W" ] || W=1080
-          [ -n "$H" ] || H=2400
-          X=$((W*88/100))
+          # Locate the actual vertical layer SeekBar from the accessibility tree rather than
+          # guessing a screen X coordinate. Then sample many layer heights until support/interface
+          # paths are proven non-zero.
+          ui_dump
+          SEEK="$(python3 - "$OUT/window.xml" <<'PY'
+          import re,sys,xml.etree.ElementTree as ET
+          root=ET.parse(sys.argv[1]).getroot()
+          best=None
+          for n in root.iter('node'):
+              if n.attrib.get('class')!='android.widget.SeekBar': continue
+              m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',n.attrib.get('bounds',''))
+              if not m: continue
+              x1,y1,x2,y2=map(int,m.groups())
+              if y2-y1 > x2-x1:
+                  best=(x1+x2)//2,y1,y2
+                  break
+          if best: print(*best)
+          PY
+          )"
+          if [ -n "$SEEK" ]; then
+            read -r SX SY1 SY2 <<< "$SEEK"
+          else
+            SIZE="$(adb shell wm size | tr -d '\r')"
+            W="$(echo "$SIZE" | sed -n 's/.*Physical size: \([0-9]*\)x\([0-9]*\).*/\1/p')"
+            H="$(echo "$SIZE" | sed -n 's/.*Physical size: \([0-9]*\)x\([0-9]*\).*/\2/p')"
+            [ -n "$W" ] || W=1080
+            [ -n "$H" ] || H=2400
+            SX=$((W*88/100)); SY1=$((H*18/100)); SY2=$((H*72/100))
+          fi
           FOUND=0
-          for P in 30 40 50 60 70 80; do
-            Y=$((H*P/100))
-            adb shell input tap "$X" "$Y"
+          for P in 10 20 30 40 50 60 70 80 90; do
+            Y=$((SY1 + (SY2-SY1)*P/100))
+            adb shell input tap "$SX" "$Y"
             sleep 1
             ui_dump
             python3 - "$OUT/window.xml" > "$OUT/support-scan-$P.txt" <<'PY'
@@ -281,8 +346,7 @@ jobs:
           root=ET.parse(sys.argv[1]).getroot()
           s=' '.join((n.attrib.get('text') or '') for n in root.iter('node'))
           m=re.search(r'Support\s+(\d+)\s+•\s+Interface\s+(\d+)',s)
-          if m:
-              print(m.group(1),m.group(2))
+          if m: print(m.group(1),m.group(2))
           PY
             if awk 'NF==2 && ($1>0 || $2>0){ok=1} END{exit !ok}' "$OUT/support-scan-$P.txt"; then
               FOUND=1
@@ -291,9 +355,59 @@ jobs:
             fi
           done
           if [ "$FOUND" != "1" ]; then
-            echo "ERROR: no preview layer with Support/Interface > 0 was found in scan" >&2
+            screenshot 08-no-support-layer-found
+            echo "ERROR: no preview layer with Support/Interface > 0 was found" >&2
             exit 32
           fi
+
+          echo "== Export G-code from preview =="
+          tap_text "EXPORT G-CODE" || focus_and_activate "EXPORT G-CODE" || true
+          sleep 3
+          ui_dump
+          screenshot 09-export-picker
+          if grep -Fqi "SAVE" "$OUT/window.xml" 2>/dev/null || grep -Fqi "Save" "$OUT/window.xml" 2>/dev/null; then
+            tap_text "SAVE" || tap_text "Save" || focus_and_activate "SAVE" || focus_and_activate "Save" || true
+          else
+            echo "ERROR: Android save picker did not open" >&2
+            exit 36
+          fi
+
+          # Export is streaming a much larger support-enabled G-code. First prove writing started,
+          # then allow up to 10 minutes for the emulator filesystem to finish.
+          START_WRITE=0
+          WRITE_END=$((SECONDS+60))
+          while (( SECONDS < WRITE_END )); do
+            ui_dump
+            if grep -Fqi "Writing G-code" "$OUT/window.xml" 2>/dev/null || grep -Fqi "G-code exported" "$OUT/window.xml" 2>/dev/null; then
+              START_WRITE=1; break
+            fi
+            sleep 2
+          done
+          if [ "$START_WRITE" != "1" ]; then
+            screenshot 10-export-not-started
+            echo "ERROR: G-code writing did not start" >&2
+            exit 37
+          fi
+
+          EXPORTED=0
+          EXPORT_END=$((SECONDS+600))
+          while (( SECONDS < EXPORT_END )); do
+            ui_dump
+            if grep -Fqi "G-code exported" "$OUT/window.xml" 2>/dev/null; then EXPORTED=1; break; fi
+            if grep -Fqi "Export blocked" "$OUT/window.xml" 2>/dev/null; then
+              screenshot 10-export-blocked
+              echo "ERROR: app blocked G-code export" >&2
+              exit 38
+            fi
+            sleep 3
+          done
+          if [ "$EXPORTED" != "1" ]; then
+            screenshot 10-export-timeout
+            adb logcat -d > "$OUT/logcat-export-timeout.txt" || true
+            echo "ERROR: G-code export timed out after writing started" >&2
+            exit 39
+          fi
+          screenshot 10-gcode-exported
 
           echo "== Crash scan =="
           adb logcat -d > "$OUT/logcat.txt"
