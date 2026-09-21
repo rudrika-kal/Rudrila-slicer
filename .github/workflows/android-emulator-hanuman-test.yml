@@ -175,13 +175,70 @@ jobs:
           echo "== Enable Supports V2 from profile dialog =="
           tap_text "Generic CoreXY 256"
           wait_text "Print profiles" 20
+          ui_dump
+          # Fresh emulator installs start with supports OFF. Toggle once, then verify the checkbox state.
           tap_text "Generate supports"
+          sleep 1
+          ui_dump
+          python3 - "$OUT/window.xml" <<'PY'
+          import sys,xml.etree.ElementTree as ET
+          root=ET.parse(sys.argv[1]).getroot()
+          nodes=[n for n in root.iter('node') if (n.attrib.get('text') or '')=='Generate supports']
+          if not nodes or nodes[0].attrib.get('checked')!='true':
+              raise SystemExit('Generate supports checkbox did not become checked')
+          PY
           tap_text "Use profiles"
-          sleep 2
+          wait_text "Profiles + Supports V2 saved" 30
+          screenshot 02b-profile-saved
 
           echo "== Slice exact Hanuman =="
-          tap_text "SLICE"
-          wait_text "Slice complete" 600
+          # The old automation could tap SLICE while the profile dialog/IME was still dismissing.
+          # Do not start the long timer until the app itself confirms that slicing actually began.
+          STARTED=0
+          for ATTEMPT in 1 2 3; do
+            echo "SLICE tap attempt $ATTEMPT"
+            tap_text "SLICE" || true
+            sleep 2
+            ui_dump
+            if grep -Fqi "Slicing" "$OUT/window.xml" 2>/dev/null || grep -Fqi "Slice complete" "$OUT/window.xml" 2>/dev/null; then
+              STARTED=1
+              break
+            fi
+            # Hide any lingering IME/overlay without navigating away from the activity.
+            adb shell input keyevent 111 || true
+            sleep 1
+          done
+          if [ "$STARTED" != "1" ]; then
+            screenshot 03-slice-not-started
+            adb logcat -d > "$OUT/logcat-slice-not-started.txt" || true
+            echo "ERROR: SLICE action never started; refusing to mislabel this as an engine timeout" >&2
+            exit 30
+          fi
+          screenshot 03-slicing-started
+
+          # Only now measure engine completion. Exact Hanuman gets a generous ceiling; progress is
+          # sampled so a real engine timeout is distinguishable from UI automation failure.
+          END=$((SECONDS+900))
+          COMPLETE=0
+          while (( SECONDS < END )); do
+            ui_dump
+            if grep -Fqi "Slice complete" "$OUT/window.xml" 2>/dev/null; then COMPLETE=1; break; fi
+            if grep -Fqi "Slice failed" "$OUT/window.xml" 2>/dev/null; then
+              screenshot 04-slice-failed
+              adb logcat -d > "$OUT/logcat-slice-failed.txt" || true
+              echo "ERROR: app reported Slice failed" >&2
+              exit 34
+            fi
+            sleep 3
+          done
+          if [ "$COMPLETE" != "1" ]; then
+            screenshot 04-engine-timeout
+            adb logcat -d > "$OUT/logcat-engine-timeout.txt" || true
+            ui_dump
+            cp "$OUT/window.xml" "$OUT/engine-timeout-window.xml" || true
+            echo "ERROR: confirmed engine timeout after slicing actually started" >&2
+            exit 35
+          fi
           ui_dump
           cp "$OUT/window.xml" "$OUT/03-slice-dialog.xml"
           grep -Fq "Geometry gate: PASS" "$OUT/03-slice-dialog.xml"
@@ -189,7 +246,7 @@ jobs:
             echo "ERROR: supports are still OFF" >&2
             exit 31
           fi
-          screenshot 03-slice-complete
+          screenshot 05-slice-complete
 
           echo "== Export G-code =="
           tap_text "EXPORT G-CODE"
@@ -198,12 +255,12 @@ jobs:
           tap_text "SAVE" || tap_text "Save" || true
           sleep 5
           wait_text "G-code exported" 120
-          screenshot 04-gcode-exported
+          screenshot 06-gcode-exported
 
           echo "== Preview runtime =="
           tap_text "PREVIEW"
           wait_text "Toolpath Preview" 60
-          screenshot 05-preview
+          screenshot 07-preview
 
           echo "== Search multiple preview heights for actual Support/Interface paths =="
           # Right slider is close to the right side of the preview dialog.
@@ -229,7 +286,7 @@ jobs:
           PY
             if awk 'NF==2 && ($1>0 || $2>0){ok=1} END{exit !ok}' "$OUT/support-scan-$P.txt"; then
               FOUND=1
-              screenshot "06-support-layer-$P"
+              screenshot "08-support-layer-$P"
               break
             fi
           done
