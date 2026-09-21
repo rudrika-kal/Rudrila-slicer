@@ -2,7 +2,12 @@ name: Rudrila Android Emulator - Hanuman Regression
 
 on:
   workflow_dispatch:
-  # Enable push later after the first successful emulator run.
+  push:
+    branches:
+      - main
+    paths:
+      - "Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip"
+      - ".github/workflows/android-emulator-hanuman-test.yml"
 
 permissions:
   contents: read
@@ -64,7 +69,7 @@ jobs:
       - name: Download exact Hanuman regression STL from latest GitHub Release
         run: |
           set -euo pipefail
-          URL="https://github.com/rudrika-kal/Rudrila-slicer/releases/latest/download/obj_1_Object_1.stl"
+          URL="https://github.com/rudrika-kal/Rudrila-slicer/releases/download/hanuman-test-assets-v1/obj_1_Object_1.stl"
           curl -L --fail --retry 4 --retry-delay 3 "$URL" -o /tmp/obj_1_Object_1.stl
           test "$(stat -c%s /tmp/obj_1_Object_1.stl)" = "153340484"
           echo "110968b1ae1610b136f664e3d2ebc1ff6106e7cd891e8f500baaa752cbfa437e  /tmp/obj_1_Object_1.stl" | sha256sum -c -
@@ -151,13 +156,17 @@ jobs:
 
           echo "== Import exact STL via Android document picker =="
           tap_text "IMPORT"
-          sleep 3
-          if ! tap_text "obj_1_Object_1.stl"; then
-            # File is normally in Recents. If not, open Downloads first.
-            tap_text "Downloads" || true
+          wait_text "Recent files" 30
+          sleep 2
+          ui_dump
+          if ! grep -Fq "obj_1_Object_1.stl" "$OUT/window.xml" 2>/dev/null; then
+            echo "STL not in Recents; navigating to Downloads"
+            tap_text "Show roots"
             sleep 2
-            tap_text "obj_1_Object_1.stl"
+            tap_text "Downloads"
+            wait_text "obj_1_Object_1.stl" 60
           fi
+          tap_text "obj_1_Object_1.stl"
           wait_text "obj_1_Object_1" 240
           screenshot 02-imported
 
