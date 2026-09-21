@@ -93,8 +93,8 @@ jobs:
           mkdir -p "$OUT"
 
           ui_dump() {
-            adb shell uiautomator dump /sdcard/window.xml >/dev/null 2>&1 || true
-            adb pull /sdcard/window.xml "$OUT/window.xml" >/dev/null 2>&1 || true
+            adb shell uiautomator dump /data/local/tmp/window.xml >/dev/null 2>&1 || true
+            adb pull /data/local/tmp/window.xml "$OUT/window.xml" >/dev/null 2>&1 || true
           }
 
           screenshot() {
@@ -153,6 +153,8 @@ jobs:
           echo "== Put exact Hanuman STL on emulator =="
           adb shell mkdir -p /sdcard/Download
           adb push /tmp/obj_1_Object_1.stl /sdcard/Download/obj_1_Object_1.stl
+          adb shell sync
+          sleep 2
 
           echo "== Import exact STL via Android document picker =="
           tap_text "IMPORT"
