@@ -1,0 +1,264 @@
+name: Rudrila Android Emulator - Hanuman Regression
+
+on:
+  workflow_dispatch:
+  # Enable push later after the first successful emulator run.
+
+permissions:
+  contents: read
+
+jobs:
+  emulator-hanuman-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate source and current patch
+        run: |
+          set -euo pipefail
+          test -f RudrilaSlicer-alpha07-source.zip
+          test -f Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip
+          unzip -t RudrilaSlicer-alpha07-source.zip >/dev/null
+          unzip -t Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip >/dev/null
+
+      - name: Extract source + merge current patch
+        run: |
+          set -euo pipefail
+          rm -rf RudrilaSlicer-alpha07-work _patch
+          unzip -q RudrilaSlicer-alpha07-source.zip
+          mkdir -p _patch
+          unzip -q Rudrila-Slicer-Step1-SliceEngineV2-Patch.zip -d _patch
+          PATCH_ROOT="$(find _patch -type d -name overlay -print -quit)"
+          test -n "$PATCH_ROOT"
+          test -d "$PATCH_ROOT/app"
+          cp -a "$PATCH_ROOT/app/." RudrilaSlicer-alpha07-work/app/
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle 9.6
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.6.0"
+
+      - name: Build debug APK
+        working-directory: RudrilaSlicer-alpha07-work
+        run: |
+          set -euo pipefail
+          gradle :app:assembleDebug --stacktrace
+
+      - name: Verify APK
+        run: |
+          set -euo pipefail
+          APK="RudrilaSlicer-alpha07-work/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$APK"
+          unzip -t "$APK" >/dev/null
+          sha256sum "$APK"
+
+      - name: Download exact Hanuman regression STL from latest GitHub Release
+        run: |
+          set -euo pipefail
+          URL="https://github.com/rudrika-kal/Rudrila-slicer/releases/latest/download/obj_1_Object_1.stl"
+          curl -L --fail --retry 4 --retry-delay 3 "$URL" -o /tmp/obj_1_Object_1.stl
+          test "$(stat -c%s /tmp/obj_1_Object_1.stl)" = "153340484"
+          echo "110968b1ae1610b136f664e3d2ebc1ff6106e7cd891e8f500baaa752cbfa437e  /tmp/obj_1_Object_1.stl" | sha256sum -c -
+          ls -lh /tmp/obj_1_Object_1.stl
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Create emulator smoke/regression script
+        run: |
+          cat > /tmp/rudrila_emulator_test.sh <<'BASH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          PKG="com.rudrila.slicer"
+          ACT="com.rudrila.slicer/.MainActivity"
+          APK="RudrilaSlicer-alpha07-work/app/build/outputs/apk/debug/app-debug.apk"
+          OUT="$GITHUB_WORKSPACE/emulator-test-output"
+          mkdir -p "$OUT"
+
+          ui_dump() {
+            adb shell uiautomator dump /sdcard/window.xml >/dev/null 2>&1 || true
+            adb pull /sdcard/window.xml "$OUT/window.xml" >/dev/null 2>&1 || true
+          }
+
+          screenshot() {
+            adb exec-out screencap -p > "$OUT/$1.png" || true
+          }
+
+          tap_text() {
+            local needle="$1"
+            ui_dump
+            python3 - "$OUT/window.xml" "$needle" <<'PY'
+          import re,sys,xml.etree.ElementTree as ET,subprocess
+          p,needle=sys.argv[1],sys.argv[2]
+          root=ET.parse(p).getroot()
+          nodes=[]
+          for n in root.iter('node'):
+              text=(n.attrib.get('text') or '')
+              desc=(n.attrib.get('content-desc') or '')
+              if text==needle or desc==needle:
+                  nodes.append(n)
+          if not nodes:
+              for n in root.iter('node'):
+                  text=(n.attrib.get('text') or '')
+                  desc=(n.attrib.get('content-desc') or '')
+                  if needle.lower() in text.lower() or needle.lower() in desc.lower():
+                      nodes.append(n)
+          if not nodes:
+              sys.exit(2)
+          b=nodes[0].attrib.get('bounds','')
+          m=re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]',b)
+          if not m: sys.exit(3)
+          x=(int(m.group(1))+int(m.group(3)))//2
+          y=(int(m.group(2))+int(m.group(4)))//2
+          subprocess.check_call(['adb','shell','input','tap',str(x),str(y)])
+          PY
+          }
+
+          wait_text() {
+            local needle="$1" timeout="${2:-120}"
+            local end=$((SECONDS+timeout))
+            while (( SECONDS < end )); do
+              ui_dump
+              if grep -Fqi "$needle" "$OUT/window.xml" 2>/dev/null; then return 0; fi
+              sleep 2
+            done
+            echo "Timed out waiting for UI text: $needle" >&2
+            return 1
+          }
+
+          echo "== Install/launch =="
+          adb install -r "$APK"
+          adb shell am force-stop "$PKG" || true
+          adb shell am start -W -n "$ACT"
+          wait_text "RUDRILA SLICER" 30
+          screenshot 01-launch
+
+          echo "== Put exact Hanuman STL on emulator =="
+          adb shell mkdir -p /sdcard/Download
+          adb push /tmp/obj_1_Object_1.stl /sdcard/Download/obj_1_Object_1.stl
+
+          echo "== Import exact STL via Android document picker =="
+          tap_text "IMPORT"
+          sleep 3
+          if ! tap_text "obj_1_Object_1.stl"; then
+            # File is normally in Recents. If not, open Downloads first.
+            tap_text "Downloads" || true
+            sleep 2
+            tap_text "obj_1_Object_1.stl"
+          fi
+          wait_text "obj_1_Object_1" 240
+          screenshot 02-imported
+
+          echo "== Enable Supports V2 from profile dialog =="
+          tap_text "Generic CoreXY 256"
+          wait_text "Print profiles" 20
+          tap_text "Generate supports"
+          tap_text "Use profiles"
+          sleep 2
+
+          echo "== Slice exact Hanuman =="
+          tap_text "SLICE"
+          wait_text "Slice complete" 600
+          ui_dump
+          cp "$OUT/window.xml" "$OUT/03-slice-dialog.xml"
+          grep -Fq "Geometry gate: PASS" "$OUT/03-slice-dialog.xml"
+          if grep -Fq "Supports V2: OFF" "$OUT/03-slice-dialog.xml"; then
+            echo "ERROR: supports are still OFF" >&2
+            exit 31
+          fi
+          screenshot 03-slice-complete
+
+          echo "== Export G-code =="
+          tap_text "EXPORT G-CODE"
+          sleep 3
+          # ACTION_CREATE_DOCUMENT should prefill rudrila_print.gcode.
+          tap_text "SAVE" || tap_text "Save" || true
+          sleep 5
+          wait_text "G-code exported" 120
+          screenshot 04-gcode-exported
+
+          echo "== Preview runtime =="
+          tap_text "PREVIEW"
+          wait_text "Toolpath Preview" 60
+          screenshot 05-preview
+
+          echo "== Search multiple preview heights for actual Support/Interface paths =="
+          # Right slider is close to the right side of the preview dialog.
+          SIZE="$(adb shell wm size | tr -d '\r')"
+          W="$(echo "$SIZE" | sed -n 's/.*Physical size: \([0-9]*\)x\([0-9]*\).*/\1/p')"
+          H="$(echo "$SIZE" | sed -n 's/.*Physical size: \([0-9]*\)x\([0-9]*\).*/\2/p')"
+          [ -n "$W" ] || W=1080
+          [ -n "$H" ] || H=2400
+          X=$((W*88/100))
+          FOUND=0
+          for P in 30 40 50 60 70 80; do
+            Y=$((H*P/100))
+            adb shell input tap "$X" "$Y"
+            sleep 1
+            ui_dump
+            python3 - "$OUT/window.xml" > "$OUT/support-scan-$P.txt" <<'PY'
+          import re,sys,xml.etree.ElementTree as ET
+          root=ET.parse(sys.argv[1]).getroot()
+          s=' '.join((n.attrib.get('text') or '') for n in root.iter('node'))
+          m=re.search(r'Support\s+(\d+)\s+•\s+Interface\s+(\d+)',s)
+          if m:
+              print(m.group(1),m.group(2))
+          PY
+            if awk 'NF==2 && ($1>0 || $2>0){ok=1} END{exit !ok}' "$OUT/support-scan-$P.txt"; then
+              FOUND=1
+              screenshot "06-support-layer-$P"
+              break
+            fi
+          done
+          if [ "$FOUND" != "1" ]; then
+            echo "ERROR: no preview layer with Support/Interface > 0 was found in scan" >&2
+            exit 32
+          fi
+
+          echo "== Crash scan =="
+          adb logcat -d > "$OUT/logcat.txt"
+          if grep -E "FATAL EXCEPTION|ANR in com\.rudrila\.slicer" "$OUT/logcat.txt"; then
+            echo "ERROR: crash/ANR detected" >&2
+            exit 33
+          fi
+
+          echo "HANUMAN_EMULATOR_REGRESSION_PASS" | tee "$OUT/result.txt"
+          BASH
+          chmod +x /tmp/rudrila_emulator_test.sh
+
+      - name: Android 36 emulator - exact Hanuman regression
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          cores: 4
+          ram-size: 4096M
+          heap-size: 512M
+          disk-size: 6144M
+          sdcard-path-or-size: 2048M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: /tmp/rudrila_emulator_test.sh
+
+      - name: Upload emulator screenshots/logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rudrila-Hanuman-Emulator-Test-Output
+          path: emulator-test-output/
+          if-no-files-found: warn
+          retention-days: 30
